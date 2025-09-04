@@ -1,299 +1,278 @@
+# app/models/recommendation_engine.py
+import os
+import json
+from typing import List, Dict, Tuple
+
+import joblib
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, classification_report
-import joblib
-import json
-from typing import List, Dict, Tuple
+from sklearn.preprocessing import StandardScaler
+
 from app.config import settings
-import os
+
 
 class RecommendationEngine:
     def __init__(self):
-        self.model = None
-        self.scaler = StandardScaler()
-        self.feature_columns = []
-        self.model_path = os.path.join(settings.MODELS_PATH, 'recommendation_model.pkl')
-        self.scaler_path = os.path.join(settings.MODELS_PATH, 'scaler.pkl')
-        
+        self.model: RandomForestClassifier | None = None
+        self.scaler: StandardScaler = StandardScaler()
+        self.feature_columns: List[str] = []
+
+        self.model_path = os.path.join(settings.MODELS_PATH, "recommendation_model.pkl")
+        self.scaler_path = os.path.join(settings.MODELS_PATH, "scaler.pkl")
+        self.columns_path = os.path.join(settings.MODELS_PATH, "feature_columns.json")  # NEW
+
+    # ---------- feature prep (same as before) ----------
     def prepare_features(self, products_df: pd.DataFrame, ratings_df: pd.DataFrame) -> pd.DataFrame:
-        """Prepare feature matrix for training"""
-        # Merge products with ratings
-        data = ratings_df.merge(products_df, left_on='product_id', right_on='id')
-        
-        feature_data = []
-        
+        if ratings_df is None or ratings_df.empty:
+            return pd.DataFrame()
+        data = ratings_df.merge(products_df, left_on="product_id", right_on="id", how="inner")
+        if data.empty:
+            return pd.DataFrame()
+
+        rows: List[Dict] = []
         for _, row in data.iterrows():
-            features = {}
-            
-            # Basic categorical features
-            features['gender_male'] = 1 if row['gender'] == 'Men' else 0
-            features['gender_female'] = 1 if row['gender'] == 'Women' else 0
-            
-            # Master category features
-            features['apparel'] = 1 if row['masterCategory'] == 'Apparel' else 0
-            features['accessories'] = 1 if row['masterCategory'] == 'Accessories' else 0
-            features['footwear'] = 1 if row['masterCategory'] == 'Footwear' else 0
-            
-            # Season features
-            features['summer'] = 1 if row['season'] == 'Summer' else 0
-            features['winter'] = 1 if row['season'] == 'Winter' else 0
-            features['monsoon'] = 1 if row['season'] == 'Monsoon' else 0
-            features['fall'] = 1 if row['season'] == 'Fall' else 0
-            
-            # Usage features
-            usage = str(row['usage']).lower()
-            features['casual'] = 1 if 'casual' in usage else 0
-            features['formal'] = 1 if 'formal' in usage else 0
-            features['sports'] = 1 if 'sports' in usage else 0
-            
-            # Color features (extract from color_features JSON if available)
-            if pd.notna(row.get('color_features')):
+            f: Dict[str, float | int | str] = {}
+
+            gender = str(row.get("gender", "")).strip()
+            f["gender_male"] = 1 if gender == "Men" else 0
+            f["gender_female"] = 1 if gender == "Women" else 0
+
+            mc = str(row.get("masterCategory", "")).strip()
+            f["apparel"] = 1 if mc == "Apparel" else 0
+            f["accessories"] = 1 if mc == "Accessories" else 0
+            f["footwear"] = 1 if mc == "Footwear" else 0
+
+            season = str(row.get("season", "")).strip()
+            f["summer"] = 1 if season == "Summer" else 0
+            f["winter"] = 1 if season == "Winter" else 0
+            f["monsoon"] = 1 if season == "Monsoon" else 0
+            f["fall"] = 1 if season == "Fall" else 0
+
+            usage = str(row.get("usage", "")).lower()
+            f["casual"] = 1 if "casual" in usage else 0
+            f["formal"] = 1 if "formal" in usage else 0
+            f["sports"] = 1 if "sports" in usage else 0
+
+            cf = row.get("color_features")
+            if pd.notna(cf):
                 try:
-                    color_data = json.loads(row['color_features'])
-                    color_percentages = color_data.get('color_percentages', {})
-                    for color, percentage in color_percentages.items():
-                        features[f'color_{color}'] = percentage
-                except:
+                    color_data = json.loads(cf)
+                    for c, pct in (color_data.get("color_percentages") or {}).items():
+                        f[f"color_{c}"] = float(pct)
+                except Exception:
                     pass
-            
-            # Style features (extract from style_features JSON if available)
-            if pd.notna(row.get('style_features')):
+
+            sf = row.get("style_features")
+            if pd.notna(sf):
                 try:
-                    style_data = json.loads(row['style_features'])
-                    for feature_name, value in style_data.items():
-                        features[f'style_{feature_name}'] = value
-                except:
+                    style_data = json.loads(sf)
+                    for k, v in (style_data or {}).items():
+                        f[f"style_{k}"] = float(v)
+                except Exception:
                     pass
-            
-            # Add target variable
-            features['rating'] = row['rating']
-            features['user_id'] = row['user_id']
-            features['product_id'] = row['product_id']
-            
-            feature_data.append(features)
-        
-        return pd.DataFrame(feature_data)
-    
+
+            f["rating"] = float(row.get("rating", 0.0))
+            f["user_id"] = int(row.get("user_id"))
+            f["product_id"] = int(row.get("product_id"))
+            rows.append(f)
+
+        return pd.DataFrame(rows)
+
+    # ---------- train / persist ----------
     def train_model(self, products_df: pd.DataFrame, ratings_df: pd.DataFrame) -> Dict:
-        """Train the recommendation model"""
-        # Prepare features
-        feature_df = self.prepare_features(products_df, ratings_df)
-        
-        if len(feature_df) < settings.MIN_RATINGS_FOR_TRAINING:
+        feat = self.prepare_features(products_df, ratings_df)
+        if feat.empty or len(feat) < settings.MIN_RATINGS_FOR_TRAINING:
             return {"error": "Not enough ratings for training"}
-        
-        # Prepare X and y
-        exclude_cols = ['rating', 'user_id', 'product_id']
-        X = feature_df.drop(columns=exclude_cols)
-        y = (feature_df['rating'] > 0.5).astype(int)  # Convert to binary classification
-        
+
+        X = feat.drop(columns=["rating", "user_id", "product_id"], errors="ignore")
+        y = (feat["rating"] > 0.5).astype(int)
+
         self.feature_columns = X.columns.tolist()
-        
-        # Split data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42
-        )
-        
-        # Scale features
+
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
         X_train_scaled = self.scaler.fit_transform(X_train)
         X_test_scaled = self.scaler.transform(X_test)
-        
-        # Train model (using RandomForest for better interpretability)
+
         self.model = RandomForestClassifier(
-            n_estimators=100,
-            max_depth=10,
-            random_state=42,
-            class_weight='balanced'
+            n_estimators=100, max_depth=10, random_state=42, class_weight="balanced"
         )
-        
         self.model.fit(X_train_scaled, y_train)
-        
-        # Evaluate
-        y_pred = self.model.predict(X_test_scaled)
-        accuracy = accuracy_score(y_test, y_pred)
-        
-        # Save model and scaler
+
+        acc = float(accuracy_score(y_test, self.model.predict(X_test_scaled)))
+
         os.makedirs(settings.MODELS_PATH, exist_ok=True)
         joblib.dump(self.model, self.model_path)
         joblib.dump(self.scaler, self.scaler_path)
-        
-        return {
-            "accuracy": accuracy,
-            "feature_count": len(self.feature_columns),
-            "training_samples": len(X_train)
-        }
-    
-    def load_model(self):
-        """Load trained model and scaler"""
-        if os.path.exists(self.model_path) and os.path.exists(self.scaler_path):
-            self.model = joblib.load(self.model_path)
-            self.scaler = joblib.load(self.scaler_path)
-            return True
-        return False
-    
-    def predict_preference(self, user_features: Dict, product_features: Dict) -> Tuple[float, Dict]:
-        """Predict user preference for a product"""
-        if not self.model:
-            if not self.load_model():
-                raise ValueError("No trained model available")
-        
-        # Combine features
-        combined_features = {**user_features, **product_features}
-        
-        # Create feature vector
-        feature_vector = []
-        feature_importance = {}
-        
-        for col in self.feature_columns:
-            value = combined_features.get(col, 0)
-            feature_vector.append(value)
-        
-        # Scale and predict
-        feature_vector = np.array(feature_vector).reshape(1, -1)
-        feature_vector_scaled = self.scaler.transform(feature_vector)
-        
-        # Get probability and feature importance
-        probability = self.model.predict_proba(feature_vector_scaled)[0][1]
-        
-        # Get feature importance for explanation
-        importances = self.model.feature_importances_
-        for i, col in enumerate(self.feature_columns):
-            if feature_vector[0][i] > 0:  # Only include active features
-                feature_importance[col] = importances[i] * feature_vector[0][i]
-        
-        return probability, feature_importance
-    
-    def get_recommendations(self, user_id: int, products_df: pd.DataFrame, 
-                          user_ratings_df: pd.DataFrame, count: int = 20) -> List[Dict]:
-        """Get personalized recommendations for a user"""
-        if not self.model:
-            if not self.load_model():
-                raise ValueError("No trained model available")
 
-        if products_df is None or products_df.empty or 'id' not in products_df.columns:
+        # NEW: persist column order so we can restore on restart
+        try:
+            with open(self.columns_path, "w", encoding="utf-8") as f:
+                json.dump(self.feature_columns, f)
+        except Exception:
+            pass
+
+        return {
+            "accuracy": acc,
+            "feature_count": len(self.feature_columns),
+            "training_samples": int(len(X_train)),
+        }
+
+    def load_model(self) -> bool:
+        if not (os.path.exists(self.model_path) and os.path.exists(self.scaler_path)):
+            return False
+
+        self.model = joblib.load(self.model_path)
+        self.scaler = joblib.load(self.scaler_path)
+
+        # Try to restore feature columns from sidecar; fallback to scaler names
+        cols = None
+        if os.path.exists(self.columns_path):
+            try:
+                with open(self.columns_path, "r", encoding="utf-8") as f:
+                    cols = json.load(f)
+            except Exception:
+                cols = None
+        if not cols and hasattr(self.scaler, "feature_names_in_"):
+            cols = list(self.scaler.feature_names_in_)
+        self.feature_columns = cols or self.feature_columns
+
+        return True
+
+    # ---------- prediction ----------
+    def _vectorize_features(self, combined: Dict) -> pd.DataFrame:
+        if not self.feature_columns:
+            raise ValueError("feature_columns is empty; train_model first.")
+        row = {c: combined.get(c, 0) for c in self.feature_columns}
+        return pd.DataFrame([row], columns=self.feature_columns)
+
+    def predict_preference(self, user_features: Dict, product_features: Dict) -> Tuple[float, Dict]:
+        if not self.model and not self.load_model():
+            raise ValueError("No trained model available")
+
+        X_row_df = self._vectorize_features({**user_features, **product_features})
+        X_row_scaled = self.scaler.transform(X_row_df)
+        proba = float(self.model.predict_proba(X_row_scaled)[0][1])
+
+        importance: Dict[str, float] = {}
+        if hasattr(self.model, "feature_importances_"):
+            imps = self.model.feature_importances_
+            for i, col in enumerate(self.feature_columns):
+                val = float(X_row_df.iloc[0, i])
+                if val:
+                    importance[col] = float(imps[i]) * val
+        return proba, importance
+
+    # ---------- public API ----------
+    def get_recommendations(
+        self, user_id: int, products_df: pd.DataFrame, user_ratings_df: pd.DataFrame, count: int = 20
+    ) -> List[Dict]:
+        if not self.model and not self.load_model():
+            raise ValueError("No trained model available")
+        if products_df is None or products_df.empty or "id" not in products_df.columns:
             return []
 
-        rated_product_ids = set(user_ratings_df[user_ratings_df['user_id'] == user_id]['product_id'])
-        user_profile = self._build_user_profile(user_id, user_ratings_df, products_df)
+        rated = set(user_ratings_df[user_ratings_df["user_id"] == user_id]["product_id"])
+        profile = self._build_user_profile(user_id, user_ratings_df, products_df)
 
-        recommendations = []
-        for _, product in products_df.iterrows():
-            if product['id'] in rated_product_ids:
+        recs: List[Dict] = []
+        for _, p in products_df.iterrows():
+            pid = int(p["id"])
+            if pid in rated:
                 continue
-            product_features = self._extract_product_features(product)
-            score, importance = self.predict_preference(user_profile, product_features)
-            explanation = self._generate_explanation(importance, product)
-            recommendations.append({
-                'product_id': product['id'],
-                'score': float(score),
-                'explanation': explanation,
-                'product_name': product.get('productDisplayName'),
-                'image_path': f"{product['id']}.jpg"
-            })
+            score, imp = self.predict_preference(profile, self._extract_product_features(p))
+            recs.append(
+                {
+                    "product_id": pid,
+                    "score": float(score),
+                    "explanation": self._generate_explanation(imp, p),
+                    "product_name": p.get("productDisplayName"),
+                    "image_path": f"{pid}.jpg",
+                }
+            )
+        recs.sort(key=lambda x: x["score"], reverse=True)
+        return recs[: max(1, int(count))]
 
-        recommendations.sort(key=lambda x: x['score'], reverse=True)
-        return recommendations[:count]
-    
-    # inside RecommendationEngine._build_user_profile
+    # ---------- helpers (unchanged) ----------
     def _build_user_profile(self, user_id: int, ratings_df: pd.DataFrame, products_df: pd.DataFrame) -> Dict:
-        """Build user preference profile from ratings"""
-        user_ratings = ratings_df[ratings_df['user_id'] == user_id]
-        if len(user_ratings) == 0:
+        user_ratings = ratings_df[ratings_df["user_id"] == user_id]
+        if user_ratings.empty:
             return {}
+        liked_ids = user_ratings[user_ratings["rating"] > 0.5]["product_id"]
+        liked = products_df[products_df["id"].isin(liked_ids)]
 
-        if products_df is None or products_df.empty or 'id' not in products_df.columns:
-            return {}
-
-        liked_products = user_ratings[user_ratings['rating'] > 0.5]['product_id']
-        liked_product_data = products_df[products_df['id'].isin(liked_products)]
-
-        profile = {}
-        if len(liked_product_data) > 0:
-            gender_counts = liked_product_data['gender'].value_counts(dropna=True)
-            if len(gender_counts) > 0:
-                profile['preferred_gender'] = gender_counts.index[0]
-
-            if 'baseColour' in liked_product_data.columns:
-                color_counts = liked_product_data['baseColour'].value_counts(dropna=True)
-                profile['preferred_colors'] = color_counts.head(3).index.tolist()
-
-            if 'masterCategory' in liked_product_data.columns:
-                category_counts = liked_product_data['masterCategory'].value_counts(dropna=True)
-                profile['preferred_categories'] = category_counts.head(2).index.tolist()
-
-            if 'season' in liked_product_data.columns:
-                season_counts = liked_product_data['season'].value_counts(dropna=True)
-                profile['preferred_seasons'] = season_counts.head(2).index.tolist()
-
+        profile: Dict[str, object] = {}
+        if not liked.empty:
+            if "gender" in liked.columns and not liked["gender"].dropna().empty:
+                profile["preferred_gender"] = liked["gender"].value_counts().idxmax()
+            if "baseColour" in liked.columns and not liked["baseColour"].dropna().empty:
+                profile["preferred_colors"] = liked["baseColour"].value_counts().head(3).index.tolist()
+            if "masterCategory" in liked.columns and not liked["masterCategory"].dropna().empty:
+                profile["preferred_categories"] = liked["masterCategory"].value_counts().head(2).index.tolist()
+            if "season" in liked.columns and not liked["season"].dropna().empty:
+                profile["preferred_seasons"] = liked["season"].value_counts().head(2).index.tolist()
         return profile
-    
+
     def _extract_product_features(self, product: pd.Series) -> Dict:
-        """Extract features from product data"""
-        features = {}
-        
-        # Basic features
-        features['gender_male'] = 1 if product['gender'] == 'Men' else 0
-        features['gender_female'] = 1 if product['gender'] == 'Women' else 0
-        
-        # Category features
-        features['apparel'] = 1 if product['masterCategory'] == 'Apparel' else 0
-        features['accessories'] = 1 if product['masterCategory'] == 'Accessories' else 0
-        features['footwear'] = 1 if product['masterCategory'] == 'Footwear' else 0
-        
-        # Season features
-        features['summer'] = 1 if product['season'] == 'Summer' else 0
-        features['winter'] = 1 if product['season'] == 'Winter' else 0
-        features['monsoon'] = 1 if product['season'] == 'Monsoon' else 0
-        features['fall'] = 1 if product['season'] == 'Fall' else 0
-        
-        # Usage features
-        usage = str(product['usage']).lower()
-        features['casual'] = 1 if 'casual' in usage else 0
-        features['formal'] = 1 if 'formal' in usage else 0
-        features['sports'] = 1 if 'sports' in usage else 0
-        
-        # Add color and style features if available
-        if pd.notna(product.get('color_features')):
+        f: Dict[str, float | int] = {}
+        g = str(product.get("gender", "")).strip()
+        f["gender_male"] = 1 if g == "Men" else 0
+        f["gender_female"] = 1 if g == "Women" else 0
+        m = str(product.get("masterCategory", "")).strip()
+        f["apparel"] = 1 if m == "Apparel" else 0
+        f["accessories"] = 1 if m == "Accessories" else 0
+        f["footwear"] = 1 if m == "Footwear" else 0
+        s = str(product.get("season", "")).strip()
+        f["summer"] = 1 if s == "Summer" else 0
+        f["winter"] = 1 if s == "Winter" else 0
+        f["monsoon"] = 1 if s == "Monsoon" else 0
+        f["fall"] = 1 if s == "Fall" else 0
+        usage = str(product.get("usage", "")).lower()
+        f["casual"] = 1 if "casual" in usage else 0
+        f["formal"] = 1 if "formal" in usage else 0
+        f["sports"] = 1 if "sports" in usage else 0
+        cf = product.get("color_features")
+        if pd.notna(cf):
             try:
-                color_data = json.loads(product['color_features'])
-                color_percentages = color_data.get('color_percentages', {})
-                for color, percentage in color_percentages.items():
-                    features[f'color_{color}'] = percentage
-            except:
+                cd = json.loads(cf)
+                for c, pct in (cd.get("color_percentages") or {}).items():
+                    f[f"color_{c}"] = float(pct)
+            except Exception:
                 pass
-        
-        return features
-    
-    def _generate_explanation(self, importance: Dict, product: pd.Series) -> str:
-        """Generate human-readable explanation for recommendation"""
-        # Sort features by importance
-        sorted_features = sorted(importance.items(), key=lambda x: x[1], reverse=True)
-        
-        explanations = []
-        
-        for feature, weight in sorted_features[:3]:  # Top 3 features
-            if weight < 0.01:  # Skip very low importance features
+        sf = product.get("style_features")
+        if pd.notna(sf):
+            try:
+                sd = json.loads(sf)
+                for k, v in (sd or {}).items():
+                    f[f"style_{k}"] = float(v)
+            except Exception:
+                pass
+        return f
+
+    def _generate_explanation(self, imp: Dict[str, float], product: pd.Series) -> str:
+        if not imp:
+            mc = str(product.get("masterCategory") or "").lower()
+            return f"Recommended based on similar {mc} preferences" if mc else "Recommended for you"
+        top = sorted(imp.items(), key=lambda x: x[1], reverse=True)
+        phrases: List[str] = []
+        for feat, w in top[:3]:
+            if w < 0.01:
                 continue
-                
-            if 'color_' in feature:
-                color = feature.replace('color_', '')
-                explanations.append(f"strong {color} color preference")
-            elif feature == 'casual':
-                explanations.append("preference for casual wear")
-            elif feature == 'formal':
-                explanations.append("preference for formal wear")
-            elif feature == 'gender_male':
-                explanations.append("preference for men's fashion")
-            elif feature == 'gender_female':
-                explanations.append("preference for women's fashion")
-            elif feature in ['summer', 'winter', 'monsoon', 'fall']:
-                explanations.append(f"preference for {feature} season items")
-        
-        if not explanations:
-            return f"Recommended based on similar {product['masterCategory'].lower()} preferences"
-        
-        return f"Recommended due to your {', '.join(explanations[:2])}"
+            if feat.startswith("color_"):
+                phrases.append(f"strong {feat.replace('color_', '')} color preference")
+            elif feat == "casual":
+                phrases.append("preference for casual wear")
+            elif feat == "formal":
+                phrases.append("preference for formal wear")
+            elif feat == "sports":
+                phrases.append("preference for sportswear")
+            elif feat == "gender_male":
+                phrases.append("preference for men's fashion")
+            elif feat == "gender_female":
+                phrases.append("preference for women's fashion")
+            elif feat in {"summer", "winter", "monsoon", "fall"}:
+                phrases.append(f"preference for {feat} season items")
+        return f"Recommended due to your {', '.join(phrases[:2])}" if phrases else \
+               (f"Recommended based on similar {str(product.get('masterCategory') or '').lower()} preferences" or "Recommended for you")
