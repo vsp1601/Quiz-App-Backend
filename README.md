@@ -44,14 +44,14 @@ Backend/
 ## 🛠️ Tech Stack
 
 - **Backend Framework**: FastAPI
-- **Database**: SQLite (default) / PostgreSQL
+- **Database**: SQLite (default)
 - **ORM**: SQLAlchemy
 - **Authentication**: JWT with PassLib
 - **Machine Learning**: scikit-learn, pandas, numpy
 - **Image Processing**: OpenCV, Pillow
 - **Caching**: Redis
 - **Containerization**: Docker, Docker Compose
-- **API Documentation**: Swagger UI / ReDoc
+- **API Documentation**: Swagger UI
 
 ## 📋 Prerequisites
 
@@ -281,26 +281,6 @@ Once the server is running, visit:
 - Input validation with Pydantic
 - SQL injection protection with SQLAlchemy
 
-## 🚀 Deployment
-
-### Environment Setup
-
-1. **Production Environment Variables**
-   ```env
-   DATABASE_URL=postgresql://user:password@db-host:5432/fashion_db
-   SECRET_KEY=your-production-secret-key
-   REDIS_URL=redis://redis-host:6379
-   ```
-
-2. **Database Migration**
-   ```bash
-   # The application automatically creates tables on startup
-   # For production, consider using Alembic for migrations
-   ```
-
-3. **Static Files**
-   - Ensure the `images/` directory is properly mounted
-   - Configure reverse proxy for static file serving
 
 ### Scaling Considerations
 
@@ -309,54 +289,10 @@ Once the server is running, visit:
 - Consider horizontal scaling with load balancers
 - Use CDN for image serving
 
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## 📝 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🆘 Troubleshooting
-
-### Common Issues
-
-1. **Database Connection Error**
-   - Ensure PostgreSQL is running
-   - Check database credentials in `.env`
-   - Verify database exists
-
-2. **Image Loading Issues**
-   - Ensure images are in the correct directory
-   - Check file permissions
-   - Verify image file formats
-
-3. **ML Model Errors**
-   - Ensure sufficient training data
-   - Check feature extraction pipeline
-   - Verify model file permissions
-
-### Getting Help
-
-- Check the [Issues](https://github.com/your-repo/issues) page
-- Review the API documentation
-- Check application logs for detailed error messages
-
 ## 🔮 Future Enhancements
 
 - [ ] Real-time recommendations with WebSockets
 - [ ] Advanced ML models (Deep Learning)
-- [ ] Multi-language support
 - [ ] Advanced analytics dashboard
-- [ ] A/B testing framework
-- [ ] Mobile app integration
-- [ ] Social features (sharing, following)
-- [ ] Advanced filtering and search
 
----
 
-**Built with ❤️ using FastAPI and Machine Learning**
